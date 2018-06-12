@@ -1,0 +1,70 @@
+FROM oraclelinux:7-slim
+
+ARG ORACLE_BASE=/opt/oracle
+ARG ORACLE_HOME=/opt/oracle/product/11.2.0.1/dbhome_1
+ARG INSTALL_FILE="http://192.168.1.100:8000/database.tar"
+ARG INSTALL_RSP="db_install.rsp"
+ARG NETCA_RSP="netca.rsp"
+ARG DBCA_RSP="dbca.rsp"
+ARG REQUIRED_SPACE_GB=20
+ARG proxy=192.168.1.100:3129
+ARG INSTALL_DIR=$ORACLE_BASE/install
+ARG PATH=$ORACLE_HOME/bin:$ORACLE_HOME/OPatch/:/usr/sbin:$PATH
+ARG LD_LIBRARY_PATH=$ORACLE_HOME/lib:/usr/lib
+ARG CLASSPATH=$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+ 
+# Copy binaries
+COPY $INSTALL_RSP $NETCA_RSP $DBCA_RSP runOracle.sh /install/
+
+
+RUN sync && \
+    if [ `df -PB 1G / | tail -n 1 | awk '{ print $4 }'` -lt $REQUIRED_SPACE_GB ]; then echo "ERROR:The container needs at least $REQUIRED_SPACE_GB GB !!!!!!!!!!!" && exit 1; fi &&\
+	echo "proxy=http://${proxy}" >>/etc/yum.conf &&\
+	echo "export http_proxy=${proxy}" >>/etc/profile &&\
+	echo "export ORACLE_BASE=${ORACLE_BASE}">>/etc/profile &&\
+	echo "export ORACLE_HOME=${ORACLE_HOME}">>/etc/profile &&\
+	echo "export export PATH=\$ORACLE_HOME/bin:\$PATH">>/etc/profile &&\
+	source /etc/profile &&\
+	yum -y install oracle-rdbms-server-11gR2-preinstall tar openssl openssh-server vi && \
+	ssh-keygen -t ecdsa -f /etc/ssh/ssh_host_ecdsa_key -N ""  && \
+	ssh-keygen -t dsa -f /etc/ssh/ssh_host_ed25519_key -N ""  && \
+	sed -ri 's/^#PermitRootLogin\s+.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+	sed -ri 's/UsePAM yes/#UsePAM yes/g' /etc/ssh/sshd_config && \
+	mkdir /var/run/sshd && \
+	mkdir -p $ORACLE_BASE/scripts/setup && \
+	mkdir $ORACLE_BASE/scripts/startup && \
+	ln -s $ORACLE_BASE/scripts /docker-entrypoint-initdb.d && \
+	mkdir $ORACLE_BASE/oradata && \
+	rm -rf /var/cache/yum && \
+	echo 'root:root' |chpasswd  && \
+	echo 'oracle:oracle' | chpasswd && \
+	chown -R oracle:dba $ORACLE_BASE
+
+# Install DB software
+USER oracle
+RUN if [ ! -d $INSTALL_DIR ]; then cp -R /install $ORACLE_BASE ; fi && \
+	sed -i -e "s|###ORACLE_BASE###|$ORACLE_BASE|g" $INSTALL_DIR/$INSTALL_RSP && \
+	sed -i -e "s|###ORACLE_HOME###|$ORACLE_HOME|g" $INSTALL_DIR/$INSTALL_RSP && \
+	# Install Oracle binaries
+	cd $INSTALL_DIR && \
+	curl ${INSTALL_FILE}|tar -xv   && \
+	chmod -R 777 $INSTALL_DIR/database && \
+	$INSTALL_DIR/database/runInstaller -ignoresysprereqs -ignoreprereq -silent -force -waitforcompletion -responsefile $INSTALL_DIR/$INSTALL_RSP && \
+	${ORACLE_HOME}/bin/netca /silent /responseFile $INSTALL_DIR/$NETCA_RSP && \
+	sed -i -e "s|`hostname`|###hostname###|g" ${ORACLE_HOME}/network/admin/listener.ora  && \
+	#${ORACLE_HOME}/bin/dbca -silent -responseFile $INSTALL_DIR/$DBCA_RSP && \
+	cd $HOME  && \
+	mv $INSTALL_DIR/runOracle.sh .  && \
+	echo "unset http_proxy" >> .bash_profile  && \
+	rm -rf $INSTALL_DIR/database || echo "rm $INSTALL_DIR/database Failed"
+
+
+USER root
+RUN $ORACLE_BASE/oraInventory/orainstRoot.sh && \
+    $ORACLE_HOME/root.sh && \
+	rm -rf /install
+	
+
+VOLUME ["$ORACLE_BASE/oradata"]
+EXPOSE 1521 22
+CMD    ["/usr/sbin/sshd", "-D"]
